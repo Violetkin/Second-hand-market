@@ -1,0 +1,5 @@
+{
+  "name": "WeChat Pay Manual Ledger",
+  "description": "A manual entry dashboard for tracking real-time revenue and statistics.",
+  "requestFramePermissions": []
+}
