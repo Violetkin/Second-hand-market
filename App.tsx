@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { 
   Plus, Trash2, Leaf, DollarSign, Activity, Archive, 
-  ArrowLeft, Smartphone, Monitor, ArrowRight, Settings, Palette,
-  Globe, RotateCcw, List, Languages, Database, BarChart3, CreditCard
+  ArrowLeft, ArrowRight, Settings, Palette,
+  Globe, RotateCcw, List, Languages, Database, BarChart3, CreditCard,
+  Cloud, CloudOff, Loader2
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid 
@@ -11,8 +12,20 @@ import { Record, DashboardStats } from './types';
 import { TransactionRow } from './components/TransactionRow';
 import { StatCard } from './components/StatCard';
 import { BioSwarm } from './components/BioSwarm';
-import { NatureElements } from './components/NatureElements'; // New Import
+import { NatureElements } from './components/NatureElements';
 import { AnimatePresence, motion } from 'framer-motion';
+
+// --- Firebase Imports ---
+import { db } from './src/firebase';
+import { 
+  collection, 
+  addDoc, 
+  deleteDoc, 
+  doc, 
+  onSnapshot, 
+  query, 
+  orderBy 
+} from 'firebase/firestore';
 
 type ViewState = 'home' | 'merchant' | 'display' | 'admin';
 type Lang = 'en' | 'zh';
@@ -40,12 +53,13 @@ const TRANSLATIONS = {
     notePlaceholder: "Items, Source, etc...",
     recordBtn: "Record Transaction",
     sessionStats: "Session: {count} entries",
+    syncing: "Syncing...",
 
     // Admin
     dataMgmt: "Data Management",
     theme: "Theme",
     hexCode: "HEX Code",
-    recordsTitle: "Records",
+    recordsTitle: "Global Records",
     empty: "Empty",
 
     // Dashboard
@@ -55,9 +69,9 @@ const TRANSLATIONS = {
     impact: "Impact",
     co2Saved: "CO2 Saved",
     velocity: "Velocity",
-    recent: "Recent",
+    recent: "Global Recent",
     noData: "No data",
-    live: "Live"
+    live: "Real-time"
   },
   zh: {
     // Home
@@ -80,12 +94,13 @@ const TRANSLATIONS = {
     notePlaceholder: "物品名称、来源等...",
     recordBtn: "确认记账",
     sessionStats: "本次会话: {count} 笔",
+    syncing: "同步中...",
 
     // Admin
     dataMgmt: "数据管理",
     theme: "主题配色",
     hexCode: "HEX 代码",
-    recordsTitle: "交易记录",
+    recordsTitle: "全网记录",
     empty: "暂无数据",
 
     // Dashboard
@@ -95,9 +110,9 @@ const TRANSLATIONS = {
     impact: "环保贡献",
     co2Saved: "碳减排",
     velocity: "增长速率",
-    recent: "最近交易",
+    recent: "全网实时交易",
     noData: "暂无数据",
-    live: "实时"
+    live: "云端实时"
   }
 };
 
@@ -156,18 +171,16 @@ const AdminRow: React.FC<AdminRowProps> = ({ record, themeColor, onDelete, confi
 
 const App: React.FC = () => {
   const [view, setView] = useState<ViewState>('home');
-  const [lang, setLang] = useState<Lang>('zh'); // Default to Chinese as per request context
+  const [lang, setLang] = useState<Lang>('zh'); 
   
   // --- STATE ---
-  const [records, setRecords] = useState<Record[]>(() => {
-    try {
-      const saved = localStorage.getItem('wx_ledger_records');
-      return saved ? JSON.parse(saved) : [];
-    } catch (e) {
-      return [];
-    }
-  });
+  // Records are now fetched from Firebase, initializing as empty array
+  const [records, setRecords] = useState<Record[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [sessionCount, setSessionCount] = useState(0); // Track local session entries
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Theme stays local preference (User specific)
   const [themeColor, setThemeColor] = useState<string>(() => {
     return localStorage.getItem('wx_ledger_theme') || DEFAULT_THEME;
   });
@@ -175,14 +188,41 @@ const App: React.FC = () => {
   const [amountInput, setAmountInput] = useState('');
   const [noteInput, setNoteInput] = useState('');
 
-  // Persistence
-  useEffect(() => { localStorage.setItem('wx_ledger_records', JSON.stringify(records)); }, [records]);
+  // Persistence for Theme only
   useEffect(() => { localStorage.setItem('wx_ledger_theme', themeColor); }, [themeColor]);
 
-  // Sync
+  // --- FIREBASE SYNC ---
+  useEffect(() => {
+    // Create a query against the collection, ordered by timestamp
+    const q = query(collection(db, "transactions"), orderBy("timestamp", "desc"));
+    
+    // Set up real-time listener
+    const unsubscribe = onSnapshot(q, (querySnapshot) => {
+      const loadedRecords: Record[] = [];
+      querySnapshot.forEach((doc) => {
+        const data = doc.data();
+        loadedRecords.push({
+          id: doc.id,
+          amount: data.amount,
+          note: data.note,
+          // Handle cases where serverTimestamp hasn't synced back yet
+          timestamp: data.timestamp ? data.timestamp : Date.now() 
+        });
+      });
+      setRecords(loadedRecords);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error fetching data: ", error);
+      setLoading(false);
+    });
+
+    // Cleanup subscription on unmount
+    return () => unsubscribe();
+  }, []);
+
+  // Sync Tabs (Theme only)
   useEffect(() => {
     const handleStorageChange = (e: StorageEvent) => {
-      if (e.key === 'wx_ledger_records' && e.newValue) setRecords(JSON.parse(e.newValue));
       if (e.key === 'wx_ledger_theme' && e.newValue) setThemeColor(e.newValue);
     };
     window.addEventListener('storage', handleStorageChange);
@@ -199,6 +239,7 @@ const App: React.FC = () => {
 
   // Chart Data
   const chartData = useMemo(() => {
+    // Sort oldest to newest for the chart
     const sorted = [...records].sort((a, b) => a.timestamp - b.timestamp);
     let runningTotal = 0;
     return sorted.map((record, index) => {
@@ -213,26 +254,42 @@ const App: React.FC = () => {
   }, [records]);
 
   // Handlers
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const val = parseFloat(amountInput);
     if (!val || val <= 0) return;
-    const newRecord: Record = {
-      id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      amount: val,
-      note: noteInput.trim() || 'Quick Sale',
-      timestamp: Date.now()
-    };
-    setRecords(prev => [newRecord, ...prev]);
-    setAmountInput('');
-    setNoteInput('');
+
+    setIsSubmitting(true);
+    
+    try {
+      // Add to Firestore
+      await addDoc(collection(db, "transactions"), {
+        amount: val,
+        note: noteInput.trim() || 'Quick Sale',
+        timestamp: Date.now() 
+      });
+      
+      setSessionCount(prev => prev + 1);
+      setAmountInput('');
+      setNoteInput('');
+    } catch (e) {
+      console.error("Error adding document: ", e);
+      alert("Error adding record. Please check your internet connection.");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleDelete = (id: string) => setRecords(prev => prev.filter(r => r.id !== id));
-  
-  const handleReset = () => {
-    if (window.confirm('Reset all transaction data?')) setRecords([]);
+  const handleDelete = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, "transactions", id));
+    } catch (e) {
+      console.error("Error removing document: ", e);
+      alert("Error deleting record.");
+    }
   };
+  
+  // Removed global Reset functionality for data safety in multi-user environment
 
   const formatCurrency = (val: number) => new Intl.NumberFormat(lang === 'zh' ? 'zh-CN' : 'en-US', { style: 'currency', currency: 'CNY' }).format(val);
   const formatNumber = (val: number) => new Intl.NumberFormat(lang === 'zh' ? 'zh-CN' : 'en-US').format(val);
@@ -313,6 +370,12 @@ const App: React.FC = () => {
             </motion.button>
 
           </div>
+          
+          {/* Connection Status Indicator */}
+          <div className="mt-12 flex items-center gap-2 text-xs text-stone-400 font-medium tracking-wide">
+             {loading ? <Loader2 size={14} className="animate-spin" /> : <Cloud size={14} className="text-emerald-500" />}
+             <span>{loading ? "Connecting to Cloud..." : "Cloud Connected"}</span>
+          </div>
 
         </div>
       </div>
@@ -334,7 +397,7 @@ const App: React.FC = () => {
           <div className="bg-white/80 backdrop-blur-xl rounded-[2.5rem] p-10 shadow-2xl shadow-stone-200/50 border border-white">
             <div className="flex items-center justify-between mb-8">
               <h2 className="text-2xl font-bold tracking-tight text-stone-900">{t.newEntry}</h2>
-              <div className="w-3 h-3 rounded-full bg-emerald-500 animate-pulse"></div>
+              <div className={`w-3 h-3 rounded-full ${isSubmitting ? 'bg-yellow-400 animate-ping' : 'bg-emerald-500'}`}></div>
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-8">
@@ -353,6 +416,7 @@ const App: React.FC = () => {
                     style={{ caretColor: themeColor }}
                     value={amountInput}
                     onChange={e => setAmountInput(e.target.value)}
+                    disabled={isSubmitting}
                   />
                 </div>
               </div>
@@ -367,22 +431,32 @@ const App: React.FC = () => {
                   className="w-full bg-stone-50/50 border-none rounded-2xl px-6 py-4 text-stone-900 focus:ring-2 focus:ring-emerald-100 transition-all placeholder-stone-300"
                   value={noteInput}
                   onChange={e => setNoteInput(e.target.value)}
+                  disabled={isSubmitting}
                 />
               </div>
 
               <button 
                 type="submit"
-                disabled={!amountInput}
-                className="w-full bg-stone-900 text-white text-lg font-medium py-5 rounded-2xl shadow-lg hover:bg-emerald-600 transition-all flex items-center justify-center gap-2 disabled:opacity-20 disabled:cursor-not-allowed group"
+                disabled={!amountInput || isSubmitting}
+                className="w-full bg-stone-900 text-white text-lg font-medium py-5 rounded-2xl shadow-lg hover:bg-emerald-600 transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed group"
               >
-                <Plus size={24} className="group-hover:rotate-90 transition-transform" />
-                <span>{t.recordBtn}</span>
+                {isSubmitting ? (
+                  <>
+                    <Loader2 size={24} className="animate-spin" />
+                    <span>{t.syncing}</span>
+                  </>
+                ) : (
+                  <>
+                    <Plus size={24} className="group-hover:rotate-90 transition-transform" />
+                    <span>{t.recordBtn}</span>
+                  </>
+                )}
               </button>
             </form>
             
             <div className="mt-8 text-center">
               <p className="text-xs text-stone-400 font-medium">
-                {t.sessionStats.replace('{count}', stats.transactionCount.toString())}
+                {t.sessionStats.replace('{count}', sessionCount.toString())}
               </p>
             </div>
           </div>
@@ -406,14 +480,7 @@ const App: React.FC = () => {
                 </button>
                 <h1 className="text-4xl font-bold tracking-tight">{t.dataMgmt}</h1>
              </div>
-             <div className="flex gap-4">
-                <button 
-                  onClick={handleReset}
-                  className="flex items-center gap-2 px-4 py-2 rounded-full border border-stone-200 text-stone-500 hover:border-red-200 hover:text-red-600 hover:bg-red-50 transition-all text-xs font-bold uppercase tracking-wider"
-                >
-                  <RotateCcw size={14} /> {t.reset}
-                </button>
-             </div>
+             {/* Removed Reset Button for safety in multi-user mode */}
            </header>
 
            <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
@@ -451,7 +518,12 @@ const App: React.FC = () => {
                   </div>
                   
                   <div className="flex-1 overflow-y-auto p-4 space-y-1 custom-scrollbar">
-                    {records.length === 0 ? (
+                    {loading ? (
+                      <div className="h-full flex flex-col items-center justify-center text-stone-300 animate-pulse">
+                         <Cloud size={48} className="mb-4 text-emerald-200" />
+                         <p>{t.syncing}</p>
+                      </div>
+                    ) : records.length === 0 ? (
                       <div className="h-full flex flex-col items-center justify-center text-stone-300">
                         <Archive size={48} strokeWidth={1} className="mb-4" />
                         <p>{t.empty}</p>
@@ -493,7 +565,10 @@ const App: React.FC = () => {
             </div>
          </div>
          <div className="hidden md:block text-right">
-            <div className="text-sm font-medium text-stone-400">{new Date().toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US')}</div>
+            <div className="flex items-center gap-3 text-sm font-medium text-stone-400">
+               {loading && <span className="animate-pulse text-emerald-500 text-xs">{t.syncing}</span>}
+               {new Date().toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US')}
+            </div>
          </div>
       </div>
 
