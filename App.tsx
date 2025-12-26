@@ -15,17 +15,8 @@ import { BioSwarm } from './components/BioSwarm';
 import { NatureElements } from './components/NatureElements';
 import { AnimatePresence, motion } from 'framer-motion';
 
-// --- Firebase Imports ---
-import { db } from './src/firebase';
-import { 
-  collection, 
-  addDoc, 
-  deleteDoc, 
-  doc, 
-  onSnapshot, 
-  query, 
-  orderBy 
-} from 'firebase/firestore';
+// --- LeanCloud Imports ---
+import AV from './src/leancloud';
 
 type ViewState = 'home' | 'merchant' | 'display' | 'admin';
 type Lang = 'en' | 'zh';
@@ -174,7 +165,6 @@ const App: React.FC = () => {
   const [lang, setLang] = useState<Lang>('zh'); 
   
   // --- STATE ---
-  // Records are now fetched from Firebase, initializing as empty array
   const [records, setRecords] = useState<Record[]>([]);
   const [loading, setLoading] = useState(true);
   const [sessionCount, setSessionCount] = useState(0); // Track local session entries
@@ -191,33 +181,73 @@ const App: React.FC = () => {
   // Persistence for Theme only
   useEffect(() => { localStorage.setItem('wx_ledger_theme', themeColor); }, [themeColor]);
 
-  // --- FIREBASE SYNC ---
+  // --- LEANCLOUD SYNC ---
   useEffect(() => {
-    // Create a query against the collection, ordered by timestamp
-    const q = query(collection(db, "transactions"), orderBy("timestamp", "desc"));
-    
-    // Set up real-time listener
-    const unsubscribe = onSnapshot(q, (querySnapshot) => {
-      const loadedRecords: Record[] = [];
-      querySnapshot.forEach((doc) => {
-        const data = doc.data();
-        loadedRecords.push({
-          id: doc.id,
-          amount: data.amount,
-          note: data.note,
-          // Handle cases where serverTimestamp hasn't synced back yet
-          timestamp: data.timestamp ? data.timestamp : Date.now() 
-        });
-      });
-      setRecords(loadedRecords);
-      setLoading(false);
-    }, (error) => {
-      console.error("Error fetching data: ", error);
-      setLoading(false);
-    });
+    let subscription: any = null;
 
-    // Cleanup subscription on unmount
-    return () => unsubscribe();
+    const initData = async () => {
+      try {
+        const query = new AV.Query('Transaction');
+        query.descending('createdAt');
+        query.limit(100); // Initial fetch limit
+
+        // 1. Initial Fetch
+        const results = await query.find();
+        const mappedRecords = results.map(obj => ({
+          id: obj.id || '',
+          amount: obj.get('amount'),
+          note: obj.get('note'),
+          timestamp: (obj.createdAt as Date).getTime()
+        }));
+        setRecords(mappedRecords);
+        setLoading(false);
+
+        // 2. Setup LiveQuery Subscription
+        subscription = await query.subscribe();
+        
+        subscription.on('create', (obj: any) => {
+          const newRecord: Record = {
+            id: obj.id || '',
+            amount: obj.get('amount'),
+            note: obj.get('note'),
+            timestamp: (obj.createdAt as Date).getTime()
+          };
+          setRecords(prev => [newRecord, ...prev]);
+        });
+
+        subscription.on('delete', (obj: any) => {
+          setRecords(prev => prev.filter(r => r.id !== obj.id));
+        });
+
+        // Optional: Handle updates if you plan to edit records
+        subscription.on('update', (obj: any) => {
+           setRecords(prev => prev.map(r => {
+             if (r.id === obj.id) {
+               return {
+                 ...r,
+                 amount: obj.get('amount'),
+                 note: obj.get('note'),
+                 timestamp: (obj.createdAt as Date).getTime()
+               };
+             }
+             return r;
+           }));
+        });
+
+      } catch (error) {
+        console.error("LeanCloud setup failed:", error);
+        setLoading(false);
+      }
+    };
+
+    initData();
+
+    // Cleanup
+    return () => {
+      if (subscription) {
+        subscription.unsubscribe();
+      }
+    };
   }, []);
 
   // Sync Tabs (Theme only)
@@ -262,12 +292,19 @@ const App: React.FC = () => {
     setIsSubmitting(true);
     
     try {
-      // Add to Firestore
-      await addDoc(collection(db, "transactions"), {
-        amount: val,
-        note: noteInput.trim() || 'Quick Sale',
-        timestamp: Date.now() 
-      });
+      // Create new LeanCloud Object
+      const Transaction = AV.Object.extend('Transaction');
+      const transaction = new Transaction();
+      
+      transaction.set('amount', val);
+      transaction.set('note', noteInput.trim() || 'Quick Sale');
+      // 'createdAt' is handled automatically by LeanCloud
+      
+      await transaction.save();
+      
+      // State update is handled by LiveQuery 'create' event,
+      // but for instant local feedback we can also optimize here if network is slow.
+      // However, relying on LiveQuery ensures consistency.
       
       setSessionCount(prev => prev + 1);
       setAmountInput('');
@@ -282,15 +319,15 @@ const App: React.FC = () => {
 
   const handleDelete = async (id: string) => {
     try {
-      await deleteDoc(doc(db, "transactions", id));
+      const todo = AV.Object.createWithoutData('Transaction', id);
+      await todo.destroy();
+      // State update handled by LiveQuery 'delete' event
     } catch (e) {
       console.error("Error removing document: ", e);
       alert("Error deleting record.");
     }
   };
   
-  // Removed global Reset functionality for data safety in multi-user environment
-
   const formatCurrency = (val: number) => new Intl.NumberFormat(lang === 'zh' ? 'zh-CN' : 'en-US', { style: 'currency', currency: 'CNY' }).format(val);
   const formatNumber = (val: number) => new Intl.NumberFormat(lang === 'zh' ? 'zh-CN' : 'en-US').format(val);
   
