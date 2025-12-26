@@ -191,7 +191,7 @@ const App: React.FC = () => {
 
     try {
       const query = new AV.Query('Transaction');
-      query.descending('createdAt');
+      query.descending('createdAt'); // Ensures newest first
       query.limit(100); 
 
       const results = await query.find();
@@ -202,7 +202,7 @@ const App: React.FC = () => {
         timestamp: (obj.createdAt as Date).getTime()
       }));
 
-      // Update state
+      // Update state (Already sorted Newest -> Oldest due to query)
       setRecords(mappedRecords);
 
     } catch (error) {
@@ -218,10 +218,10 @@ const App: React.FC = () => {
     // 1. Initial Load (Shows full loader)
     fetchRecords(false);
 
-    // 2. Setup Polling (Silent update every 2 seconds)
+    // 2. Setup Polling (Silent update every 6 seconds for stability)
     const intervalId = setInterval(() => {
       fetchRecords(true); 
-    }, 2000);
+    }, 6000);
 
     // Cleanup
     return () => clearInterval(intervalId);
@@ -247,6 +247,7 @@ const App: React.FC = () => {
 
   // Chart Data
   const chartData = useMemo(() => {
+    // Chart needs Oldest -> Newest (Left to Right), so we sort explicitly here
     const sorted = [...records].sort((a, b) => a.timestamp - b.timestamp);
     let runningTotal = 0;
     return sorted.map((record, index) => {
@@ -705,7 +706,9 @@ const App: React.FC = () => {
                   {records.length === 0 ? (
                     <div className="text-center py-12 text-stone-300 text-sm">{t.noData}</div>
                   ) : (
-                    records.slice().reverse().map(r => (
+                    // Removed .slice().reverse() here. 
+                    // 'records' is already ordered by Newest -> Oldest from the query.
+                    records.map(r => (
                       <TransactionRow 
                         key={r.id} 
                         record={r} 
