@@ -583,7 +583,7 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen bg-[#fdfbf7] text-stone-900 flex flex-col">
       {/* Sticky Header */}
-      <div className="sticky top-0 z-30 bg-white/70 backdrop-blur-md border-b border-stone-100 px-8 py-6 flex justify-between items-center supports-[backdrop-filter]:bg-white/60">
+      <div className="sticky top-0 z-30 bg-white/70 backdrop-blur-md border-b border-stone-100 px-8 py-4 flex justify-between items-center supports-[backdrop-filter]:bg-white/60">
          <div className="flex items-center gap-6">
             <button 
               onClick={() => setView('home')} 
@@ -608,7 +608,7 @@ const App: React.FC = () => {
          </div>
       </div>
 
-      <div className="flex-1 p-6 md:p-12 max-w-7xl mx-auto w-full space-y-12">
+      <div className="flex-1 p-4 md:p-8 max-w-7xl mx-auto w-full space-y-6">
         
         {/* KPI Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -635,18 +635,19 @@ const App: React.FC = () => {
         </div>
 
         {/* Charts & List Split */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 h-auto lg:h-[500px]">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
           {/* Chart Area */}
-          <div className="lg:col-span-2 bg-white rounded-[2.5rem] p-8 flex flex-col border border-stone-100 relative overflow-hidden shadow-sm">
-             <div className="flex justify-between items-end mb-8 relative z-10">
+          <div className="lg:col-span-2 bg-white rounded-[2.5rem] p-6 flex flex-col border border-stone-100 relative overflow-hidden shadow-sm h-fit">
+             <div className="flex justify-between items-end mb-4 relative z-10">
                 <div>
                   <h2 className="text-2xl font-light tracking-tight mb-1">{t.velocity}</h2>
                 </div>
                 <Activity className="text-stone-300" />
              </div>
              
-             <div className="flex-1 w-full min-h-[300px] relative z-10">
+             {/* Fixed Height Container for Chart - Enforced 300px */}
+             <div className="w-full h-[300px] relative z-10">
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={chartData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
                     <defs>
@@ -696,19 +697,20 @@ const App: React.FC = () => {
           </div>
 
           {/* Recent List */}
-          <div className="lg:col-span-1 bg-white/60 backdrop-blur-sm rounded-[2.5rem] border border-stone-200 p-8 flex flex-col shadow-xl shadow-stone-100/50">
-             <div className="flex items-center justify-between mb-6">
+          <div className="lg:col-span-1 bg-white/60 backdrop-blur-sm rounded-[2.5rem] border border-stone-200 p-6 flex flex-col shadow-xl shadow-stone-100/50 h-fit">
+             <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-bold tracking-tight">{t.recent}</h2>
                 {isBackgroundSyncing && <RefreshCw size={12} className="animate-spin text-stone-400" />}
              </div>
-             <div className="flex-1 overflow-y-auto custom-scrollbar -mr-4 pr-4">
+             
+             {/* Limited height container with optional scroll, though 6 items should fit. */}
+             <div className="flex-1 overflow-y-auto custom-scrollbar -mr-4 pr-4 max-h-[300px]">
                 <AnimatePresence mode='popLayout'>
                   {records.length === 0 ? (
                     <div className="text-center py-12 text-stone-300 text-sm">{t.noData}</div>
                   ) : (
-                    // Removed .slice().reverse() here. 
-                    // 'records' is already ordered by Newest -> Oldest from the query.
-                    records.map(r => (
+                    // Limited to top 6 items
+                    records.slice(0, 6).map(r => (
                       <TransactionRow 
                         key={r.id} 
                         record={r} 
