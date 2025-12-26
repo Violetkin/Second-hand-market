@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { 
   Plus, Trash2, Leaf, DollarSign, Activity, Archive, 
   ArrowLeft, ArrowRight, Settings, Palette,
   Globe, RotateCcw, List, Languages, Database, BarChart3, CreditCard,
-  Cloud, CloudOff, Loader2
+  Cloud, CloudOff, Loader2, RefreshCw
 } from 'lucide-react';
 import { 
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, AreaChart, Area, CartesianGrid 
@@ -166,8 +166,9 @@ const App: React.FC = () => {
   
   // --- STATE ---
   const [records, setRecords] = useState<Record[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [sessionCount, setSessionCount] = useState(0); // Track local session entries
+  const [loading, setLoading] = useState(true); // Initial full-screen loading
+  const [isBackgroundSyncing, setIsBackgroundSyncing] = useState(false); // Subtle indicator
+  const [sessionCount, setSessionCount] = useState(0); 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Theme stays local preference (User specific)
@@ -181,74 +182,51 @@ const App: React.FC = () => {
   // Persistence for Theme only
   useEffect(() => { localStorage.setItem('wx_ledger_theme', themeColor); }, [themeColor]);
 
-  // --- LEANCLOUD SYNC ---
+  // --- DATA FETCHING (POLLING STRATEGY) ---
+  
+  // Defined as useCallback so it can be called manually
+  const fetchRecords = useCallback(async (isSilent = false) => {
+    if (!isSilent) setLoading(true);
+    else setIsBackgroundSyncing(true);
+
+    try {
+      const query = new AV.Query('Transaction');
+      query.descending('createdAt');
+      query.limit(100); 
+
+      const results = await query.find();
+      const mappedRecords = results.map(obj => ({
+        id: obj.id || '',
+        amount: obj.get('amount'),
+        note: obj.get('note'),
+        timestamp: (obj.createdAt as Date).getTime()
+      }));
+
+      // Update state
+      setRecords(mappedRecords);
+
+    } catch (error) {
+      console.error("LeanCloud fetch failed:", error);
+    } finally {
+      if (!isSilent) setLoading(false);
+      else setIsBackgroundSyncing(false);
+    }
+  }, []);
+
+  // Initial Load + Polling Interval
   useEffect(() => {
-    let subscription: any = null;
+    // 1. Initial Load (Shows full loader)
+    fetchRecords(false);
 
-    const initData = async () => {
-      try {
-        const query = new AV.Query('Transaction');
-        query.descending('createdAt');
-        query.limit(100); // Initial fetch limit
-
-        // 1. Initial Fetch
-        const results = await query.find();
-        const mappedRecords = results.map(obj => ({
-          id: obj.id || '',
-          amount: obj.get('amount'),
-          note: obj.get('note'),
-          timestamp: (obj.createdAt as Date).getTime()
-        }));
-        setRecords(mappedRecords);
-        setLoading(false);
-
-        // 2. Setup LiveQuery Subscription
-        subscription = await query.subscribe();
-        
-        subscription.on('create', (obj: any) => {
-          const newRecord: Record = {
-            id: obj.id || '',
-            amount: obj.get('amount'),
-            note: obj.get('note'),
-            timestamp: (obj.createdAt as Date).getTime()
-          };
-          setRecords(prev => [newRecord, ...prev]);
-        });
-
-        subscription.on('delete', (obj: any) => {
-          setRecords(prev => prev.filter(r => r.id !== obj.id));
-        });
-
-        // Optional: Handle updates if you plan to edit records
-        subscription.on('update', (obj: any) => {
-           setRecords(prev => prev.map(r => {
-             if (r.id === obj.id) {
-               return {
-                 ...r,
-                 amount: obj.get('amount'),
-                 note: obj.get('note'),
-                 timestamp: (obj.createdAt as Date).getTime()
-               };
-             }
-             return r;
-           }));
-        });
-
-      } catch (error) {
-        console.error("LeanCloud setup failed:", error);
-        setLoading(false);
-      }
-    };
-
-    initData();
+    // 2. Setup Polling (Silent update every 2 seconds)
+    const intervalId = setInterval(() => {
+      fetchRecords(true); 
+    }, 2000);
 
     // Cleanup
-    return () => {
-      if (subscription) {
-        subscription.unsubscribe();
-      }
-    };
-  }, []);
+    return () => clearInterval(intervalId);
+  }, [fetchRecords]);
+
 
   // Sync Tabs (Theme only)
   useEffect(() => {
@@ -269,7 +247,6 @@ const App: React.FC = () => {
 
   // Chart Data
   const chartData = useMemo(() => {
-    // Sort oldest to newest for the chart
     const sorted = [...records].sort((a, b) => a.timestamp - b.timestamp);
     let runningTotal = 0;
     return sorted.map((record, index) => {
@@ -292,23 +269,22 @@ const App: React.FC = () => {
     setIsSubmitting(true);
     
     try {
-      // Create new LeanCloud Object
       const Transaction = AV.Object.extend('Transaction');
       const transaction = new Transaction();
       
       transaction.set('amount', val);
       transaction.set('note', noteInput.trim() || 'Quick Sale');
-      // 'createdAt' is handled automatically by LeanCloud
       
       await transaction.save();
       
-      // State update is handled by LiveQuery 'create' event,
-      // but for instant local feedback we can also optimize here if network is slow.
-      // However, relying on LiveQuery ensures consistency.
-      
+      // Success!
       setSessionCount(prev => prev + 1);
       setAmountInput('');
       setNoteInput('');
+      
+      // IMMEDIATE REFRESH (Silent)
+      await fetchRecords(true);
+
     } catch (e) {
       console.error("Error adding document: ", e);
       alert("Error adding record. Please check your internet connection.");
@@ -321,7 +297,9 @@ const App: React.FC = () => {
     try {
       const todo = AV.Object.createWithoutData('Transaction', id);
       await todo.destroy();
-      // State update handled by LiveQuery 'delete' event
+      
+      // IMMEDIATE REFRESH (Silent)
+      await fetchRecords(true);
     } catch (e) {
       console.error("Error removing document: ", e);
       alert("Error deleting record.");
@@ -410,8 +388,20 @@ const App: React.FC = () => {
           
           {/* Connection Status Indicator */}
           <div className="mt-12 flex items-center gap-2 text-xs text-stone-400 font-medium tracking-wide">
-             {loading ? <Loader2 size={14} className="animate-spin" /> : <Cloud size={14} className="text-emerald-500" />}
-             <span>{loading ? "Connecting to Cloud..." : "Cloud Connected"}</span>
+             {loading ? (
+                <Loader2 size={14} className="animate-spin" />
+             ) : isBackgroundSyncing ? (
+                <RefreshCw size={14} className="animate-spin text-emerald-500" />
+             ) : (
+                <Cloud size={14} className="text-emerald-500" />
+             )}
+             <span>
+               {loading 
+                 ? "Connecting to Cloud..." 
+                 : isBackgroundSyncing 
+                   ? "Syncing changes..." 
+                   : "Cloud Connected"}
+             </span>
           </div>
 
         </div>
@@ -491,10 +481,11 @@ const App: React.FC = () => {
               </button>
             </form>
             
-            <div className="mt-8 text-center">
+            <div className="mt-8 text-center flex items-center justify-center gap-2">
               <p className="text-xs text-stone-400 font-medium">
                 {t.sessionStats.replace('{count}', sessionCount.toString())}
               </p>
+              {isBackgroundSyncing && <RefreshCw size={10} className="animate-spin text-emerald-500" />}
             </div>
           </div>
         </div>
@@ -517,7 +508,6 @@ const App: React.FC = () => {
                 </button>
                 <h1 className="text-4xl font-bold tracking-tight">{t.dataMgmt}</h1>
              </div>
-             {/* Removed Reset Button for safety in multi-user mode */}
            </header>
 
            <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
@@ -548,7 +538,10 @@ const App: React.FC = () => {
               <div className="md:col-span-2">
                 <div className="bg-white/80 backdrop-blur-md rounded-[2rem] border border-stone-100 shadow-sm overflow-hidden min-h-[500px] flex flex-col">
                   <div className="p-6 border-b border-stone-100 flex justify-between items-center">
-                    <h2 className="text-lg font-bold tracking-tight">{t.recordsTitle}</h2>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-lg font-bold tracking-tight">{t.recordsTitle}</h2>
+                      {isBackgroundSyncing && <RefreshCw size={12} className="animate-spin text-emerald-500" />}
+                    </div>
                     <span className="text-xs font-mono bg-emerald-50 text-emerald-600 px-2 py-1 rounded">
                       {records.length}
                     </span>
@@ -603,8 +596,13 @@ const App: React.FC = () => {
          </div>
          <div className="hidden md:block text-right">
             <div className="flex items-center gap-3 text-sm font-medium text-stone-400">
-               {loading && <span className="animate-pulse text-emerald-500 text-xs">{t.syncing}</span>}
-               {new Date().toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US')}
+               {isBackgroundSyncing ? (
+                 <span className="flex items-center gap-2 text-emerald-500 text-xs">
+                    <RefreshCw size={12} className="animate-spin" /> {t.syncing}
+                 </span>
+               ) : (
+                 new Date().toLocaleDateString(lang === 'zh' ? 'zh-CN' : 'en-US')
+               )}
             </div>
          </div>
       </div>
@@ -698,7 +696,10 @@ const App: React.FC = () => {
 
           {/* Recent List */}
           <div className="lg:col-span-1 bg-white/60 backdrop-blur-sm rounded-[2.5rem] border border-stone-200 p-8 flex flex-col shadow-xl shadow-stone-100/50">
-             <h2 className="text-lg font-bold tracking-tight mb-6">{t.recent}</h2>
+             <div className="flex items-center justify-between mb-6">
+                <h2 className="text-lg font-bold tracking-tight">{t.recent}</h2>
+                {isBackgroundSyncing && <RefreshCw size={12} className="animate-spin text-stone-400" />}
+             </div>
              <div className="flex-1 overflow-y-auto custom-scrollbar -mr-4 pr-4">
                 <AnimatePresence mode='popLayout'>
                   {records.length === 0 ? (
